@@ -1,0 +1,57 @@
+exchange_mode: "candle"
+
+instruments:
+  - AAPL
+
+exchanges:
+  AAPL:
+    data_source: "polygon"
+    symbol_type: "stock"
+    candle_interval: "1d"
+    spread_factor: 0.001
+    warmup_candles: 250
+    indicator_kwargs:
+      sma_periods: [20, 50, 100, 200]
+      rsi_period: 14
+      ema_periods: [12, 26]
+    news:
+      tickers: ["AAPL"]
+      max_results: 50
+
+agents:
+  LongHorizon_TradingAgents:
+    type: TradingAgentsStockSimAgent
+    count: 1
+    parameters:
+      initial_cash: 100000
+      action_interval: "1d"
+      selected_analysts: ["market", "news", "fundamentals"]
+      macro_cycle: "month"
+      max_drawdown_threshold: 0.18
+      min_trade_notional: 1000
+      tradingagents_config:
+        llm_provider: "openai"
+        deep_think_llm: "gpt-4o"
+        quick_think_llm: "gpt-4o-mini"
+        max_debate_rounds: 1
+        max_risk_discuss_rounds: 1
+        online_tools: true
+        memory_log_max_entries: 80
+      initial_positions: {AAPL: 0}
+      initial_cost_basis: {AAPL: 0.0}
+
+  BuyHold_Baseline:
+    type: Buy_And_Hold_Trader
+    count: 1
+    parameters:
+      initial_cash: 100000
+      action_interval: "1d"
+      quantity_size: 100
+      initial_positions: {AAPL: 0}
+      initial_cost_basis: {AAPL: 0.0}
+
+simulation:
+  start_time: "2024-01-02T14:30:00"
+  end_time: "2024-12-31T21:00:00"
+  tick_interval: "1d"
+  expected_exchange_agent_count: 1
