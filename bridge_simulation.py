@@ -14,7 +14,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
     from agents.benchmark_traders.trader import TraderAgent
@@ -35,7 +35,7 @@ class RegimeState:
     horizon: str
     regime: str
     risk_budget: float
-    constraints: List[str]
+    constraints: list[str]
     summary: str
 
 
@@ -54,13 +54,13 @@ class LongHorizonMemoryPool:
 
     def __init__(self, max_items: int = 80) -> None:
         self.max_items = max_items
-        self._items: List[Dict[str, Any]] = []
+        self._items: list[dict[str, Any]] = []
 
-    def retrieve(self, instrument: str) -> Dict[str, Any]:
+    def retrieve(self, instrument: str) -> dict[str, Any]:
         relevant = [m for m in self._items if m.get("instrument") == instrument]
         return {"decision_ledger": relevant[-self.max_items :]}
 
-    def append(self, item: Dict[str, Any]) -> None:
+    def append(self, item: dict[str, Any]) -> None:
         self._items.append(item)
         self._items = self._items[-self.max_items :]
 
@@ -71,7 +71,7 @@ class MacroRegimeAgent:
     Replace the heuristic body with a GPT/Claude JSON call for experiments.
     """
 
-    def infer(self, instrument: str, timestamp: datetime, compact_state: Dict[str, Any]) -> RegimeState:
+    def infer(self, instrument: str, timestamp: datetime, compact_state: dict[str, Any]) -> RegimeState:
         # CHANGED FOR LONG-HORIZON:
         # TODO(long-horizon): call a weekly/monthly Macro Agent here. It should
         # summarize market regime, capital budget, sector bias, and hard risk
@@ -99,9 +99,9 @@ class RiskVetoAgent:
     def veto_or_adjust(
         self,
         intent: TradingIntent,
-        regime_state: Optional[RegimeState],
-        compact_state: Dict[str, Any],
-    ) -> tuple[TradingIntent, Dict[str, Any]]:
+        regime_state: RegimeState | None,
+        compact_state: dict[str, Any],
+    ) -> tuple[TradingIntent, dict[str, Any]]:
         # CHANGED FOR LONG-HORIZON:
         # TODO(long-horizon): replace this deterministic guard with a Risk Agent
         # that estimates 1-2 quarter MDD/CVaR from StockSim history and vetoes
@@ -141,11 +141,11 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
 
     def __init__(
         self,
-        instrument_exchange_map: Dict[str, str],
-        agent_id: Optional[str] = None,
+        instrument_exchange_map: dict[str, str],
+        agent_id: str | None = None,
         rabbitmq_host: str = "localhost",
-        tradingagents_config: Optional[Dict[str, Any]] = None,
-        selected_analysts: Optional[List[str]] = None,
+        tradingagents_config: dict[str, Any] | None = None,
+        selected_analysts: list[str] | None = None,
         macro_cycle: str = "month",
         max_drawdown_threshold: float = 0.18,
         min_trade_notional: float = 1000.0,
@@ -169,9 +169,9 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         self.memory_pool = LongHorizonMemoryPool()
         self.macro_agent = MacroRegimeAgent()
         self.risk_agent = RiskVetoAgent(max_drawdown_threshold=max_drawdown_threshold)
-        self.regime_cache: Dict[str, RegimeState] = {}
+        self.regime_cache: dict[str, RegimeState] = {}
 
-    async def on_market_data_update(self, instrument: str, snapshot: Dict[str, Any]) -> None:
+    async def on_market_data_update(self, instrument: str, snapshot: dict[str, Any]) -> None:
         data = snapshot.get("data", {}) or {}
         if not data:
             await self._publish_decision_done()
@@ -211,7 +211,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         finally:
             await self._publish_decision_done()
 
-    def _build_compact_state(self, instrument: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_compact_state(self, instrument: str, snapshot: dict[str, Any]) -> dict[str, Any]:
         data = snapshot.get("data", {}) or {}
         indicators = snapshot.get("indicators", {}) or {}
         close = float(data.get("close") or self.prices.get(instrument) or 0.0)
@@ -251,8 +251,8 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
     def _inject_long_horizon_context(
         self,
         instrument: str,
-        compact_state: Dict[str, Any],
-        regime_state: Optional[RegimeState],
+        compact_state: dict[str, Any],
+        regime_state: RegimeState | None,
     ) -> None:
         memory_context = compact_state.get("memory", {})
         regime_text = json.dumps(regime_state.__dict__ if regime_state else {}, ensure_ascii=False)
@@ -283,7 +283,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
     def _parse_intent(
         self,
         instrument: str,
-        final_state: Dict[str, Any],
+        final_state: dict[str, Any],
         processed_signal: str,
     ) -> TradingIntent:
         raw_decision = str(final_state.get("final_trade_decision", processed_signal))
@@ -299,7 +299,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             raw_decision=raw_decision,
         )
 
-    async def _execute_target_weight(self, intent: TradingIntent, data: Dict[str, Any]) -> None:
+    async def _execute_target_weight(self, intent: TradingIntent, data: dict[str, Any]) -> None:
         price = float(data.get("close") or data.get("open") or 0.0)
         if price <= 0 or intent.action == "HOLD":
             return
@@ -334,9 +334,9 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
     def _record_bridge_decision(
         self,
         instrument: str,
-        compact_state: Dict[str, Any],
+        compact_state: dict[str, Any],
         intent: TradingIntent,
-        risk_record: Dict[str, Any],
+        risk_record: dict[str, Any],
     ) -> None:
         self.memory_pool.append({
             "timestamp": compact_state.get("timestamp"),
