@@ -27,6 +27,7 @@ from utils.time_utils import parse_datetime_utc, interval_to_seconds, parse_inte
 from utils.indicators_tracker import IndicatorsTracker
 from utils.polygon_client import PolygonClient
 from utils.alpha_vantage_client import AlphaVantageClient
+from tradingagents.dataflows.ashare_adapter import AShareDataAdapter
 from utils.data_validators import parse_quantity
 from utils.fundamentals_processor import extract_polygon_fundamentals
 from utils.subscription_manager import create_subscription_response, create_unsubscription_response
@@ -77,7 +78,7 @@ class ExchangeAgent(Agent):
             tickers: List of tickers for news feeds
             limit_news: Maximum number of news articles to fetch
             indicator_kwargs: Technical indicator configuration
-            data_source: Data source ("polygon" or "alpha_vantage")
+            data_source: Data source ("polygon", "alpha_vantage", or "akshare")
             symbol_type: Symbol type ("stock" or "crypto")
             data_start_date: Start date for indicator data (ISO format: YYYY-MM-DD)
             data_end_date: End date for indicator data (ISO format: YYYY-MM-DD)
@@ -104,14 +105,23 @@ class ExchangeAgent(Agent):
         self.symbol_type = symbol_type.lower()
         
         # Initialize data clients for external feeds
-        self.polygon_client = PolygonClient()
-        self.alpha_vantage_client = AlphaVantageClient()
+        self.polygon_client = None
+        self.alpha_vantage_client = None
+        self.ashare_client = None
         
         # Set primary data client based on user preference
-        if self.data_source == "alpha_vantage":
+        if self.data_source == "akshare":
+            # CHANGED FOR DOMESTIC DATA: AkShare is token-free; do not instantiate
+            # overseas clients that may require POLYGON/ALPHA_VANTAGE keys.
+            self.ashare_client = AShareDataAdapter()
+            self.client = self.ashare_client
+            self.logger.info(f"Initialized AkShare A-share client for external data: {instrument}")
+        elif self.data_source == "alpha_vantage":
+            self.alpha_vantage_client = AlphaVantageClient()
             self.client = self.alpha_vantage_client
             self.logger.info(f"Initialized Alpha Vantage client for external data: {instrument}")
         else:
+            self.polygon_client = PolygonClient()
             self.client = self.polygon_client
             self.logger.info(f"Initialized Polygon client for external data: {instrument}")
         
@@ -197,7 +207,19 @@ class ExchangeAgent(Agent):
             self.logger.info(f"Loading warmup data for {resolution} resolution")
             
             # Load historical candles for warmup based on data source
-            if self.data_source == "alpha_vantage":
+            if self.data_source == "akshare":
+                # CHANGED FOR DOMESTIC DATA: orderbook warmup uses qfq A-share candles.
+                historical_candles = self.ashare_client.load_aggregates(
+                    symbol=self.instrument,
+                    interval=resolution,
+                    start_date=self.warmup_start_date,
+                    end_date=self.warmup_end_date,
+                    adjusted=True,
+                    sort="asc",
+                    limit=50000,
+                    use_cache=True
+                )
+            elif self.data_source == "alpha_vantage":
                 if self.symbol_type == "crypto":
                     historical_candles = self.alpha_vantage_client.load_crypto_aggregates(
                         symbol=self.instrument,
@@ -662,7 +684,10 @@ class ExchangeAgent(Agent):
             return
 
         # Use Alpha Vantage for news if data_source is set to alpha_vantage, otherwise use Polygon.io
-        news_client = self.alpha_vantage_client if self.data_source == "alpha_vantage" else self.polygon_client
+        if self.data_source == "akshare":
+            news_client = self.ashare_client
+        else:
+            news_client = self.alpha_vantage_client if self.data_source == "alpha_vantage" else self.polygon_client
 
         try:
             news_list = news_client.load_news(

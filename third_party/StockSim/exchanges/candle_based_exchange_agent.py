@@ -27,6 +27,7 @@ from utils.messages import MessageType
 from utils.orders import Side, OrderType, OrderStatus
 from utils.polygon_client import PolygonClient
 from utils.alpha_vantage_client import AlphaVantageClient
+from tradingagents.dataflows.ashare_adapter import AShareDataAdapter
 from utils.role import Role
 from agents.agent import Agent
 from utils.subscription_manager import create_unsubscription_response, create_subscription_response
@@ -139,7 +140,7 @@ class CandleBasedExchangeAgent(Agent):
             spread_factor: Bid-ask spread factor for market making
             limit_news: Maximum number of news articles to fetch
             indicator_kwargs: Technical indicator configuration
-            data_source: Data source ("polygon" or "alpha_vantage")
+            data_source: Data source ("polygon", "alpha_vantage", or "akshare")
             symbol_type: Symbol type ("stock" or "crypto")
         """
         super().__init__(agent_id=agent_id, rabbitmq_host=rabbitmq_host)
@@ -165,18 +166,27 @@ class CandleBasedExchangeAgent(Agent):
         self.limit_news = limit_news
         
         # Initialize data clients
-        self.polygon_client = PolygonClient()
-        self.alpha_vantage_client = AlphaVantageClient()
+        self.polygon_client = None
+        self.alpha_vantage_client = None
+        self.ashare_client = None
 
         # Set primary data client based on user preference
-        if self.data_source == "alpha_vantage":
+        if self.data_source == "akshare":
+            # CHANGED FOR DOMESTIC DATA: AkShare is token-free; do not instantiate
+            # overseas clients that may require POLYGON/ALPHA_VANTAGE keys.
+            self.ashare_client = AShareDataAdapter()
+            self.client = self.ashare_client
+            self.logger.info(f"Initialized AkShare A-share client for market data: {instrument}")
+        elif self.data_source == "alpha_vantage":
+            self.alpha_vantage_client = AlphaVantageClient()
             self.client = self.alpha_vantage_client
             self.logger.info(f"Initialized Alpha Vantage client for market data: {instrument}")
         else:
+            self.polygon_client = PolygonClient()
             self.client = self.polygon_client
             self.logger.info(f"Initialized Polygon client for market data: {instrument}")
 
-        self.logger.info(f"Both Polygon.io and Alpha Vantage clients available for flexible data sourcing")
+        self.logger.info(f"Initialized primary {self.data_source} data client")
 
         # Initialize technical indicators
         self.indicators_tracker = IndicatorsTracker(**(indicator_kwargs or {}))
@@ -199,7 +209,20 @@ class CandleBasedExchangeAgent(Agent):
 
     def _load_candle_data(self):
         """Load main simulation candle data based on configured data source."""
-        if self.data_source == "alpha_vantage":
+        if self.data_source == "akshare":
+            # CHANGED FOR DOMESTIC DATA: qfq A-share candles + real China trading calendar.
+            self.candles = self.ashare_client.load_aggregates(
+                symbol=self.instrument,
+                interval=self.resolution,
+                start_date=self.start_date,
+                end_date=self.end_date,
+                adjusted=True,
+                sort="asc",
+                limit=50000,
+                use_cache=True
+            )
+            self.logger.info(f"Loaded {len(self.candles)} candles for simulation period using AkShare qfq")
+        elif self.data_source == "alpha_vantage":
             # Use Alpha Vantage for candlestick data
             if self.symbol_type == "crypto":
                 self.candles = self.alpha_vantage_client.load_crypto_aggregates(
@@ -243,7 +266,20 @@ class CandleBasedExchangeAgent(Agent):
         sim_start_dt = parse_datetime_utc(self.start_date)
         historical_start_dt = sim_start_dt - self.warmup_candles * self.candle_interval
 
-        if self.data_source == "alpha_vantage":
+        if self.data_source == "akshare":
+            # CHANGED FOR DOMESTIC DATA: warm indicators with qfq A-share history.
+            historical_candles = self.ashare_client.load_aggregates(
+                symbol=self.instrument,
+                interval=self.resolution,
+                start_date=historical_start_dt.isoformat(),
+                end_date=self.start_date,
+                adjusted=True,
+                sort="asc",
+                limit=50000,
+                use_cache=True
+            )
+            self.logger.info("Warmed up indicators using AkShare qfq data")
+        elif self.data_source == "alpha_vantage":
             # Use Alpha Vantage for warmup data
             if self.symbol_type == "crypto":
                 historical_candles = self.alpha_vantage_client.load_crypto_aggregates(
@@ -516,7 +552,10 @@ class CandleBasedExchangeAgent(Agent):
             return
 
         # Use Alpha Vantage for news if data_source is set to alpha_vantage, otherwise use Polygon.io
-        news_client = self.alpha_vantage_client if self.data_source == "alpha_vantage" else self.polygon_client
+        if self.data_source == "akshare":
+            news_client = self.ashare_client
+        else:
+            news_client = self.alpha_vantage_client if self.data_source == "alpha_vantage" else self.polygon_client
 
         try:
             news_list = news_client.load_news(

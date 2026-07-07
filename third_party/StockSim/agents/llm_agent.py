@@ -31,6 +31,7 @@ from utils.messages import MessageType
 from utils.orders import Side
 from utils.polygon_client import PolygonClient
 from utils.alpha_vantage_client import AlphaVantageClient
+from tradingagents.dataflows.ashare_adapter import AShareDataAdapter
 from utils.role import Role
 from utils.time_utils import (
     parse_datetime_utc,
@@ -420,7 +421,9 @@ class LLMTradingAgent(TraderAgent):
                 symbol_type = instr_config.get("symbol_type", "stock")
                 
                 # Initialize appropriate data client
-                if data_source == "alpha_vantage":
+                if data_source == "akshare":
+                    loader = AShareDataAdapter()
+                elif data_source == "alpha_vantage":
                     loader = AlphaVantageClient()
                 else:
                     loader = PolygonClient()
@@ -449,7 +452,8 @@ class LLMTradingAgent(TraderAgent):
                         use_cache=True
                     )
                 else:
-                    # Stock data for both Polygon and Alpha Vantage
+                    # CHANGED FOR DOMESTIC DATA: AkShare stock bars are qfq-adjusted.
+                    # Stock data for Polygon, Alpha Vantage, and AkShare.
                     full_candles = loader.load_aggregates(
                         symbol=instr,
                         interval=resolution,

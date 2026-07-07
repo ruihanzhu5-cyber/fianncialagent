@@ -29,7 +29,7 @@ from datetime import datetime
 import yaml
 import asyncio
 from multiprocessing import Process
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 if REPO_ROOT not in sys.path:
@@ -168,8 +168,8 @@ def validate_configuration(config: Dict[str, Any]) -> List[str]:
             if symbol_type == "crypto" and data_source not in ["alpha_vantage", "polygon"]:
                 errors.append(f"Invalid data source '{data_source}' for crypto symbol '{instrument}'. Use 'alpha_vantage' or 'polygon'")
 
-            if symbol_type == "stock" and data_source not in ["polygon", "alpha_vantage"]:
-                errors.append(f"Invalid data source '{data_source}' for stock symbol '{instrument}'. Use 'polygon' or 'alpha_vantage'")
+            if symbol_type == "stock" and data_source not in ["polygon", "alpha_vantage", "akshare"]:
+                errors.append(f"Invalid data source '{data_source}' for stock symbol '{instrument}'. Use 'akshare', 'polygon', or 'alpha_vantage'")
 
     # Agent configuration validation
     agents_config = config.get("agents", {})
@@ -230,7 +230,7 @@ def validate_configuration(config: Dict[str, Any]) -> List[str]:
 
     return errors
 
-def check_dependencies() -> List[str]:
+def check_dependencies(config: Optional[Dict[str, Any]] = None) -> List[str]:
     """
     Check system dependencies and API keys for demo readiness.
 
@@ -249,10 +249,19 @@ def check_dependencies() -> List[str]:
         if not os.getenv(var):
             issues.append(f"Missing required environment variable: {var} ({description})")
 
-    # Check for at least one data source API key
+    exchanges = (config or {}).get("exchanges", {})
+    uses_only_akshare = bool(exchanges) and all(
+        (inst_cfg or {}).get("data_source") == "akshare"
+        for inst_cfg in exchanges.values()
+    )
+
+    # Check for at least one overseas data API key unless all instruments use AkShare.
     data_api_keys = ["POLYGON_API_KEY", "ALPHA_VANTAGE_API_KEY"]
-    if not any(os.getenv(key) for key in data_api_keys):
+    if not uses_only_akshare and not any(os.getenv(key) for key in data_api_keys):
         issues.append("At least one data source API key required: POLYGON_API_KEY or ALPHA_VANTAGE_API_KEY")
+    elif uses_only_akshare:
+        # CHANGED FOR DOMESTIC DATA: AkShare A-share runs are token-free.
+        launcher_logger.info("AkShare-only A-share configuration detected; skipping overseas API key check.")
 
     # Check if output directories exist (for potential future use)
     charts_dir = "charts"
@@ -298,6 +307,7 @@ def generate_post_simulation_artifacts(config: Dict[str, Any]):
     """
     try:
         from utils.plot_charts import make_chart_dropdown, generate_demo_report, ensure_output_directories
+        from tradingagents.dataflows.ashare_adapter import AShareDataAdapter
         from utils.polygon_client import PolygonClient
         from utils.alpha_vantage_client import AlphaVantageClient
 
@@ -325,7 +335,9 @@ def generate_post_simulation_artifacts(config: Dict[str, Any]):
                 launcher_logger.info(f"📊 Generating artifacts for {instrument} ({symbol_type})...")
 
                 # Initialize appropriate data client
-                if data_source == "alpha_vantage":
+                if data_source == "akshare":
+                    client = AShareDataAdapter()
+                elif data_source == "alpha_vantage":
                     client = AlphaVantageClient()
                 else:
                     client = PolygonClient()
@@ -440,7 +452,7 @@ def main():
 
     # Check dependencies
     launcher_logger.info("Checking system dependencies...")
-    dependency_issues = check_dependencies()
+    dependency_issues = check_dependencies(config)
     if dependency_issues:
         launcher_logger.warning("Dependency check results:")
         for issue in dependency_issues:
@@ -652,6 +664,7 @@ def main():
         },
         "TradingAgentsStockSimAgent": lambda params: {
             **{k: v for k, v in params.items() if k != "action_interval"},
+            "data_source_config": data_source_map,
             "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
         },
         "HistoricalOrderTrader": lambda params: {

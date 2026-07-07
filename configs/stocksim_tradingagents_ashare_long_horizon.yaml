@@ -1,0 +1,60 @@
+exchange_mode: "candle"
+
+instruments:
+  - 600519.SH
+
+exchanges:
+  600519.SH:
+    # CHANGED FOR DOMESTIC DATA: token-free AkShare A-share tape with qfq adjustment.
+    data_source: "akshare"
+    symbol_type: "stock"
+    candle_interval: "1d"
+    spread_factor: 0.001
+    warmup_candles: 250
+    indicator_kwargs:
+      sma_periods: [20, 60, 120, 250]
+      rsi_period: 14
+      ema_periods: [12, 26]
+    news:
+      tickers: ["600519.SH"]
+      max_results: 20
+
+agents:
+  LongHorizon_TradingAgents:
+    type: TradingAgentsStockSimAgent
+    count: 1
+    parameters:
+      initial_cash: 1000000
+      action_interval: "1d"
+      selected_analysts: ["market", "news", "fundamentals"]
+      macro_cycle: "month"
+      max_drawdown_threshold: 0.18
+      min_trade_notional: 10000
+      tradingagents_config:
+        market_region: "cn"
+        data_source: "akshare"
+        llm_provider: "openai"
+        deep_think_llm: "gpt-4o"
+        quick_think_llm: "gpt-4o-mini"
+        max_debate_rounds: 1
+        max_risk_discuss_rounds: 1
+        online_tools: true
+        memory_log_max_entries: 80
+      initial_positions: {"600519.SH": 0}
+      initial_cost_basis: {"600519.SH": 0.0}
+
+  BuyHold_Baseline:
+    type: Buy_And_Hold_Trader
+    count: 1
+    parameters:
+      initial_cash: 1000000
+      action_interval: "1d"
+      quantity_size: 100
+      initial_positions: {"600519.SH": 0}
+      initial_cost_basis: {"600519.SH": 0.0}
+
+simulation:
+  start_time: "2022-01-04T09:30:00"
+  end_time: "2024-12-31T15:00:00"
+  tick_interval: "1d"
+  expected_exchange_agent_count: 1

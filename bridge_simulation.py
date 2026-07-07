@@ -25,6 +25,7 @@ except ImportError:  # Allows static import from the repository root.
     MessageType = None  # type: ignore[assignment]
     Side = None  # type: ignore[assignment]
 
+from tradingagents.dataflows.ashare_adapter import AShareDataAdapter
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -145,6 +146,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         agent_id: str | None = None,
         rabbitmq_host: str = "localhost",
         tradingagents_config: dict[str, Any] | None = None,
+        data_source_config: dict[str, dict[str, str]] | None = None,
         selected_analysts: list[str] | None = None,
         macro_cycle: str = "month",
         max_drawdown_threshold: float = 0.18,
@@ -159,6 +161,17 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         )
         config = dict(DEFAULT_CONFIG)
         config.update(tradingagents_config or {})
+        self.data_source_config = data_source_config or {}
+        if self._uses_ashare_data(config):
+            # CHANGED FOR DOMESTIC DATA: route TradingAgents market/indicator/fundamental
+            # calls through AkShare so StockSim and the LLM debate consume one A-share tape.
+            data_vendors = dict(config.get("data_vendors", {}))
+            data_vendors.update({
+                "core_stock_apis": "akshare",
+                "technical_indicators": "akshare",
+                "fundamental_data": "akshare",
+            })
+            config["data_vendors"] = data_vendors
         self.trading_graph = TradingAgentsGraph(
             selected_analysts=tuple(selected_analysts or ["market", "news", "fundamentals"]),
             debug=bool(config.get("debug", False)),
@@ -227,10 +240,23 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             peak = max(price_points)
             current = price_points[-1]
             dd = current / peak - 1.0 if peak else 0.0
+        try:
+            ashare_symbol = AShareDataAdapter.to_exchange_symbol(instrument)
+        except ValueError:
+            ashare_symbol = instrument
 
         return {
             "timestamp": self.current_time.isoformat() if self.current_time else None,
             "instrument": instrument,
+            # CHANGED FOR DOMESTIC DATA: expose A-share normalization and qfq/calendar provenance
+            # to downstream prompts, memory records, and risk-veto audit logs.
+            "ashare_symbol": ashare_symbol,
+            "price_adjustment": "qfq" if self._instrument_uses_ashare(instrument) else None,
+            "trade_calendar": (
+                "akshare.tool_trade_date_hist_sina"
+                if self._instrument_uses_ashare(instrument)
+                else None
+            ),
             "ohlcv": {
                 "open": data.get("open"),
                 "high": data.get("high"),
@@ -247,6 +273,18 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "realized_vol_20d": indicators.get("volatility_20d") or indicators.get("atr"),
             "memory": self.memory_pool.retrieve(instrument),
         }
+
+    def _uses_ashare_data(self, config: dict[str, Any]) -> bool:
+        if config.get("market_region") == "cn" or config.get("data_source") == "akshare":
+            return True
+        return any(
+            (source_cfg or {}).get("data_source") == "akshare"
+            for source_cfg in self.data_source_config.values()
+        )
+
+    def _instrument_uses_ashare(self, instrument: str) -> bool:
+        source_cfg = self.data_source_config.get(instrument, {})
+        return source_cfg.get("data_source") == "akshare"
 
     def _inject_long_horizon_context(
         self,
@@ -394,4 +432,3 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             return 0.5
         value = float(match.group(1))
         return value / 100.0 if value > 1 else value
-
