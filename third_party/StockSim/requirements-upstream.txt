@@ -1,3 +1,6 @@
+# Upstream StockSim requirements kept for reference only.
+# This integrated repo installs from root requirements-merged.txt.
+
 # Core dependencies
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
@@ -21,15 +24,9 @@ plotly>=5.0.0
 # Date/time handling
 pytz>=2023.0
 
-# Web search functionality (if using news analyst)
+# Web search functionality
 aiohttp>=3.8.0
 beautifulsoup4>=4.12.0
-
-# LLM dependencies (only if using LLM agents)
-openai>=1.0.0
-aiobotocore>=2.12.0
-torch>=2.0.0
-transformers>=4.30.0
 
 # Logging
 colorlog>=6.0.0

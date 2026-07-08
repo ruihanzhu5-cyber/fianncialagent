@@ -224,3 +224,17 @@ reports/
 
 # Large StockSim sample order dumps are not required for the bridge baseline.
 third_party/StockSim/orders/*.json
+
+# Project runtime outputs
+logs/
+metrics/
+traces/
+cache/
+.tradingagents/
+results/
+worklog/
+
+# Local experiment outputs
+*.jsonl
+*.tmp.yaml
+stocksim_ablation_*.yaml

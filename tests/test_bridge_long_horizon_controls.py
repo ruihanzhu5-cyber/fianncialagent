@@ -27,6 +27,7 @@ class _DummyTraderAgent:
         self.current_tick_id = 1
         self.logger = types.SimpleNamespace(error=lambda *a, **k: None, warning=lambda *a, **k: None)
         self.placed_orders = []
+        self.mark_count = 0
 
     async def place_order(self, instrument, side, quantity, order_type, **kwargs):
         order_id = f"order-{len(self.placed_orders) + 1}"
@@ -42,10 +43,14 @@ class _DummyTraderAgent:
             self.cash += float(trade_data["price"]) * int(trade_data["quantity"])
         self.metrics.trade_history.append({"action": "BUY" if trade_data["role"] == "BUYER" else "SELL"})
 
+    def _mark_to_market(self):
+        self.mark_count += 1
+
 
 class _DummyGraph:
     def __init__(self, *args, **kwargs):
-        self.memory_log = types.SimpleNamespace(store_decision=lambda **kwargs: None)
+        self.stored = []
+        self.memory_log = types.SimpleNamespace(store_decision=lambda **kwargs: self.stored.append(kwargs))
 
     def propagate(self, instrument, trade_date):
         return {"final_trade_decision": '{"action":"HOLD","target_weight":0.0}'}, "HOLD"
@@ -132,3 +137,46 @@ def test_transaction_cost_changes_accounting(bridge_module):
     }))
     assert agent.cash == pytest.approx(98998.7)
     assert agent.microstructure_guard.ledger.get("600519.SH").frozen_qty == 100
+    assert agent.mark_count == 1
+
+
+def test_macro_position_cap_applies_even_without_tail_risk(bridge_module):
+    agent = _agent(bridge_module, {"enable_tail_risk_veto": False})
+    regime = bridge_module.RegimeState(
+        as_of="2024-03-15T00:00:00",
+        horizon="1M",
+        regime="risk_off",
+        max_position_weight=0.35,
+        cvar_budget=0.08,
+        constraints=[],
+        summary="risk off",
+    )
+    intent = bridge_module.TradingIntent(
+        action="BUY",
+        target_weight=0.8,
+        max_trade_weight=None,
+        confidence=0.8,
+        rationale="test",
+        rationale_type=None,
+        valid_until=None,
+        raw_decision="test",
+        instrument="600519.SH",
+    )
+    capped = agent._apply_position_cap(intent, regime)
+    assert capped.target_weight == 0.35
+    assert agent._last_macro_cap_record["macro_cap_applied"] is True
+
+
+def test_no_long_horizon_can_skip_context_injection(bridge_module):
+    agent = _agent(bridge_module, {
+        "enable_macro_regime": False,
+        "enable_dynamic_memory": False,
+        "enable_tail_risk_veto": False,
+        "inject_bridge_context": False,
+    })
+    inject_context = bool(agent.long_horizon_config.get(
+        "inject_bridge_context",
+        agent.macro_enabled or agent.dynamic_memory_enabled or agent.risk_veto_enabled,
+    ))
+    assert inject_context is False
+    assert agent.trading_graph.stored == []

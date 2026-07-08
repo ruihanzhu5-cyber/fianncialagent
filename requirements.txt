@@ -1,1 +1,1 @@
-.
+-r requirements-merged.txt

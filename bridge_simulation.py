@@ -235,6 +235,11 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         )
         self.previous_intents: dict[str, TradingIntent] = {}
         self.pending_microstructure: dict[str, dict[str, Any]] = {}
+        self._last_macro_cap_record: dict[str, Any] = {
+            "macro_cap_applied": False,
+            "pre_macro_target_weight": None,
+            "post_macro_target_weight": None,
+        }
         self.regime_cache: dict[str, RegimeState] = {}
 
     async def on_market_data_update(self, instrument: str, snapshot: dict[str, Any]) -> None:
@@ -261,7 +266,12 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         compact_state["memory"] = self._retrieve_memory(
             instrument, regime_state.regime if regime_state else "unknown"
         )
-        self._inject_long_horizon_context(instrument, compact_state, regime_state)
+        inject_context = bool(self.long_horizon_config.get(
+            "inject_bridge_context",
+            self.macro_enabled or self.dynamic_memory_enabled or self.risk_veto_enabled,
+        ))
+        if inject_context:
+            self._inject_long_horizon_context(instrument, compact_state, regime_state)
 
         try:
             trade_date = self.current_time.strftime("%Y-%m-%d")
@@ -269,6 +279,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             if activation.full_debate_triggered or instrument not in self.previous_intents:
                 final_state, processed_signal = self.trading_graph.propagate(instrument, trade_date)
                 intent = self._parse_intent(instrument, final_state, processed_signal)
+                intent = self._apply_position_cap(intent, regime_state)
                 self.previous_intents[instrument] = intent
             else:
                 final_state, processed_signal = {}, ""
@@ -558,13 +569,28 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
                 self.microstructure_guard.stats.get("accounting_transaction_cost", 0.0) + fee
             )
             if self.metrics.trade_history:
-                self.metrics.trade_history[-1]["transaction_cost"] = fee
+                last_trade = self.metrics.trade_history[-1]
+                last_trade["transaction_cost"] = fee
+                if last_trade.get("action") == "SELL":
+                    last_trade["realized_profit"] = last_trade.get("realized_profit", 0.0) - fee
+            if hasattr(self, "_mark_to_market"):
+                self._mark_to_market()
 
     def _apply_position_cap(
         self, intent: TradingIntent, regime_state: RegimeState | None
     ) -> TradingIntent:
+        self._last_macro_cap_record = {
+            "macro_cap_applied": False,
+            "pre_macro_target_weight": intent.target_weight,
+            "post_macro_target_weight": intent.target_weight,
+        }
         if not regime_state or intent.target_weight <= regime_state.max_position_weight:
             return intent
+        self._last_macro_cap_record = {
+            "macro_cap_applied": True,
+            "pre_macro_target_weight": intent.target_weight,
+            "post_macro_target_weight": regime_state.max_position_weight,
+        }
         return TradingIntent(**{
             **intent.as_dict(),
             "target_weight": regime_state.max_position_weight,
@@ -643,6 +669,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "cvar_budget": regime_state.cvar_budget if regime_state else risk_record.get("cvar_budget"),
             "raw_intent": raw_intent.as_dict() if raw_intent else None,
             "risk_adjusted_intent": intent.as_dict(),
+            **self._last_macro_cap_record,
             "veto_mask": bool(risk_record.get("veto_mask") or risk_record.get("veto")),
             "decay_applied": bool(risk_record.get("decay_applied")),
             "risk_rewrite_reason": risk_record.get("risk_rewrite_reason"),

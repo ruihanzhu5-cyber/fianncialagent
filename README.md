@@ -1,73 +1,98 @@
-# Long-Horizon TradingAgents x StockSim
+# Long-Horizon A-share Financial Multi-Agent Benchmark
 
-Training-free financial multi-agent research scaffold.
+This repository is a training-free research codebase for long-horizon China A-share financial multi-agent backtesting. It bridges TradingAgents and StockSim into one paper-oriented experiment pipeline.
 
-## Core Composition
+This repository keeps TradingAgents as the only LLM decision brain. StockSim is used only as the event-driven simulation, execution, accounting, and metrics substrate.
 
-- **Decision brain**: `TauricResearch/TradingAgents` provides analyst reports, bull/bear debate, risk debate, portfolio judgement, and `TradingAgentsGraph.propagate()`.
-- **Evaluation substrate**: `harrypapadakis/StockSim` provides event-driven market simulation, order execution, portfolio accounting, and long-horizon metrics.
-- **Bridge**: `bridge_simulation.py` exposes `TradingAgentsStockSimAgent`, a StockSim trader whose market-data callback calls TradingAgents and maps the final decision into StockSim orders.
+## What This Repo Is
 
-## Long-Horizon Inserts
+- A reproducible A-share benchmark framework for TradingAgents-style financial multi-agent decisions.
+- A StockSim-backed event loop for market data, order execution, portfolio accounting, and metrics.
+- A training-free long-horizon control layer with macro regime caps, dynamic memory, tail-risk veto, A-share microstructure realism, and decision traces.
 
-- `# CHANGED FOR LONG-HORIZON`: monthly/weekly **MacroRegimeAgent** cache before micro trading decisions.
-- `# CHANGED FOR LONG-HORIZON`: pre-order **RiskVetoAgent** that can reduce or block high-risk target weights.
-- Compact state passes OHLCV, indicators, portfolio value, drawdown, volatility, and memory ledger instead of raw full history.
-- `# CHANGED FOR DOMESTIC DATA`: **AShareDataAdapter** routes China A-share OHLCV through AkShare with `qfq` adjustment and the Sina A-share trade calendar.
+## What This Repo Is Not
 
-## Layout
+- It is not a fine-tuning or trained-model project.
+- It is not a pure upstream TradingAgents release.
+- It is not a pure upstream StockSim release.
+- Do not run upstream StockSim LLMTradingAgent for paper experiments. It has been removed/disabled to avoid duplicate LLM decision systems.
+- `cli/` is retained only for upstream TradingAgents compatibility and manual debugging. It is not used in paper experiments.
+
+## Core Runtime Path
 
 ```text
-tradingagents/                         # upstream TradingAgents core
-third_party/StockSim/                  # upstream StockSim core
-bridge_simulation.py                   # non-invasive integration layer
-configs/stocksim_tradingagents_long_horizon.yaml
 configs/stocksim_tradingagents_ashare_long_horizon.yaml
-requirements-merged.txt
+        -> scripts/run_ablation.py  (optional overlay merge)
+        -> third_party/StockSim/main_launcher.py
+        -> CandleBasedExchangeAgent
+        -> TradingAgentsStockSimAgent in bridge_simulation.py
+        -> TradingAgentsGraph.propagate()
+        -> TradingIntentParser
+        -> MacroRegimeAgent / UtilityMemoryManager / TailRiskForecaster
+        -> ChinaMicrostructureGuard
+        -> StockSim order execution and portfolio accounting
+        -> metrics + traces
 ```
 
-## Run Skeleton
+## Installation
+
+Use the integrated dependency entry only:
 
 ```bash
 pip install -r requirements-merged.txt
-python third_party/StockSim/main_launcher.py configs/stocksim_tradingagents_long_horizon.yaml
 ```
 
-For China A-share experiments:
+`requirements.txt` delegates to `requirements-merged.txt`. The upstream StockSim requirements are retained only as `third_party/StockSim/requirements-upstream.txt` for reference.
+
+## A-share Experiment
 
 ```bash
 python third_party/StockSim/main_launcher.py configs/stocksim_tradingagents_ashare_long_horizon.yaml
 ```
 
-Set `OPENAI_API_KEY` and a reachable RabbitMQ host. AkShare A-share runs do not require `POLYGON_API_KEY` or `ALPHA_VANTAGE_API_KEY`; legacy overseas configs still do.
+Set `OPENAI_API_KEY` and a reachable RabbitMQ host. AkShare A-share market data does not require Polygon or Alpha Vantage keys.
 
-## A-share Ablations
+## Ablation Experiments
 
-Run ablations by merging the base StockSim config with an overlay:
+Run an ablation by merging the base config with an overlay:
 
 ```bash
 python scripts/run_ablation.py --base configs/stocksim_tradingagents_ashare_long_horizon.yaml --overlay configs/ablations/ashare_A0_full.yaml
 ```
 
-Use `--dry-run` to only materialize the merged YAML. Ablation IDs:
+Use `--dry-run` to materialize the merged YAML without launching StockSim.
 
 - `A0_full`: MacroRegime + DynamicMemory + TailRiskVeto + ChinaMicrostructure.
 - `A1_no_macro`: disables macro regime control.
 - `A2_no_dynamic_memory`: disables utility-scored memory retrieval.
 - `A3_no_tail_risk_veto`: disables risk intent rewrites.
-- `A4_no_long_horizon`: disables macro, dynamic memory, and tail-risk veto.
+- `A4_no_long_horizon`: disables macro, dynamic memory, tail-risk veto, and bridge context injection.
 - `A5_no_china_microstructure`: disables A-share microstructure guards.
 - `A6_daily_full_debate`: forces daily full debate.
 - `A7_rule_only_risk`: uses drawdown-threshold risk instead of historical CVaR.
 
-## Metrics
+## Output Files
 
-StockSim exports metrics under `METRICS_OUTPUT_DIR` or `metrics/`, including:
+Runtime outputs are intentionally ignored by Git:
 
-- ROI
-- Sharpe Ratio
-- Annualized Sharpe Ratio
-- Sortino Ratio
-- Max Drawdown
-- Win Rate
-- Profit Factor
+- `logs/`
+- `metrics/`
+- `traces/`
+- `cache/`
+- temporary merged ablation YAML files
+
+Decision traces are JSONL rows intended for ablation tables and auditability.
+
+## Retained Upstream Components
+
+- TradingAgents graph, agents, dataflows, LLM clients, and memory utilities needed by `TradingAgentsGraph`.
+- StockSim exchange, simulation clock, accounting utilities, order utilities, and core `TraderAgent`.
+- Traditional baseline traders: Buy-and-Hold, SMA, and MACD.
+
+## Removed Upstream Components
+
+- StockSim's separate LLMTradingAgent and analyst/wrapper stack.
+- Redundant StockSim baseline traders not used by the paper path.
+- Upstream-only changelog content.
+
+The cleaned architecture is intentionally narrow: TradingAgents decides; StockSim simulates and accounts; the bridge adds long-horizon A-share controls without training new model weights.

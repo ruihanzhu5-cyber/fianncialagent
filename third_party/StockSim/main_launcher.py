@@ -20,7 +20,6 @@ import logging
 import os
 import json
 import time
-import random
 import sys
 import signal
 import traceback
@@ -35,16 +34,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, o
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from agents.benchmark_traders.historical_order_trader import HistoricalOrderTrader
 from exchanges.candle_based_exchange_agent import CandleBasedExchangeAgent
 from exchanges.exchange_agent import ExchangeAgent
-from agents.llm_agent import LLMTradingAgent
 from agents.benchmark_traders.buy_and_hold_trader import BuyAndHoldTrader
 from agents.benchmark_traders.sma_trader import SMATrader
 from agents.benchmark_traders.macd_trader import MACDTrader
-from agents.benchmark_traders.random_trader import RandomTrader
-from agents.benchmark_traders.bollinger_bands_trader import BollingerBandsTrader
-from agents.benchmark_traders.slma_trader import SLMATrader
 from bridge_simulation import TradingAgentsStockSimAgent
 from simulation.simulation_clock import SimulationClock
 from utils.logging_setup import setup_logger
@@ -53,14 +47,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 AGENT_TYPE_MAPPING = {
-    "LLMTradingAgent": LLMTradingAgent,
     "Buy_And_Hold_Trader": BuyAndHoldTrader,
     "SMA_Trader": SMATrader,
     "MACD_Trader": MACDTrader,
-    "Random_Trader": RandomTrader,
-    "Bollinger_Bands_Trader": BollingerBandsTrader,
-    "SLMA_Trader": SLMATrader,
-    "HistoricalOrderTrader": HistoricalOrderTrader,
     "TradingAgentsStockSimAgent": TradingAgentsStockSimAgent,
 }
 
@@ -182,28 +171,6 @@ def validate_configuration(config: Dict[str, Any]) -> List[str]:
             errors.append(f"Missing agent type for agent '{agent_name}'")
         elif agent_type not in AGENT_TYPE_MAPPING:
             errors.append(f"Unsupported agent type '{agent_type}' for agent '{agent_name}'")
-
-        # Validate LLM agent specific requirements
-        if agent_type == "LLMTradingAgent":
-            parameters = agent_details.get("parameters", {})
-            models = parameters.get("models", {})
-
-            # Check for required analyst configurations
-            enable_market = parameters.get("enable_market_analyst", True)
-            enable_news = parameters.get("enable_news_analyst", False)
-            enable_fundamental = parameters.get("enable_fundamental_analyst", False)
-
-            if enable_market and "market_analysis" not in models:
-                errors.append(f"LLM agent '{agent_name}' has market analyst enabled but no market_analysis model configured")
-
-            if enable_news and "news" not in models:
-                errors.append(f"LLM agent '{agent_name}' has news analyst enabled but no news model configured")
-
-            if enable_fundamental and "fundamental_analysis" not in models:
-                errors.append(f"LLM agent '{agent_name}' has fundamental analyst enabled but no fundamental_analysis model configured")
-
-            if "aggregator" not in models:
-                errors.append(f"LLM agent '{agent_name}' missing required aggregator model")
 
     # Simulation configuration validation
     simulation_config = config.get("simulation", {})
@@ -406,8 +373,8 @@ def generate_post_simulation_artifacts(config: Dict[str, Any]):
                 "timestamp": datetime.now().isoformat()
             },
             "research_metrics": {
-                "llm_agents": sum(1 for agent in config.get("agents", {}).values() if agent.get("type") == "LLMTradingAgent"),
-                "benchmark_agents": sum(1 for agent in config.get("agents", {}).values() if agent.get("type") != "LLMTradingAgent"),
+                "llm_agents": sum(1 for agent in config.get("agents", {}).values() if agent.get("type") == "TradingAgentsStockSimAgent"),
+                "benchmark_agents": sum(1 for agent in config.get("agents", {}).values() if agent.get("type") != "TradingAgentsStockSimAgent"),
                 "multi_market": len(set(exchanges_config.get(inst, {}).get("symbol_type", "stock") for inst in instruments)) > 1
             }
         }
@@ -486,33 +453,14 @@ def main():
 
     # Count different agent types for demo insights
     agent_type_counts = {}
-    llm_agents_with_analysts = []
 
     for agent_name, agent_details in agents_config.items():
         agent_type = agent_details.get("type", "Unknown")
         agent_type_counts[agent_type] = agent_type_counts.get(agent_type, 0) + agent_details.get("count", 1)
 
-        if agent_type == "LLMTradingAgent":
-            params = agent_details.get("parameters", {})
-            analysts = []
-            if params.get("enable_market_analyst", True):
-                analysts.append("Market")
-            if params.get("enable_news_analyst", False):
-                analysts.append("News")
-            if params.get("enable_fundamental_analyst", False):
-                analysts.append("Fundamental")
-
-            if analysts:
-                llm_agents_with_analysts.append(f"{agent_name} ({', '.join(analysts)})")
-
     launcher_logger.info("Agent Composition:")
     for agent_type, count in agent_type_counts.items():
         launcher_logger.info(f"   • {agent_type}: {count}")
-
-    if llm_agents_with_analysts:
-        launcher_logger.info("LLM Agent Analyst Configuration:")
-        for agent_info in llm_agents_with_analysts:
-            launcher_logger.info(f"   • {agent_info}")
 
     simulation_start_timestamp = datetime.now()
 
@@ -541,7 +489,7 @@ def main():
     llm_count = sum(
         details.get("count", 1)
         for _, details in agents_config.items()
-        if details.get("type") == "LLMTradingAgent"
+        if details.get("type") == "TradingAgentsStockSimAgent"
     )
 
     launcher_logger.info("Launching Exchange Agents...")
@@ -652,28 +600,10 @@ def main():
 
     # Agent parameter customization
     agent_custom_params = {
-        "Random_Trader": lambda params: {
-            **params,
-            "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
-        },
-        "LLMTradingAgent": lambda params: {
-            **{k: v for k, v in params.items() if k != "action_interval"},
-            "start_time": simulation_start_time,
-            "end_time": simulation_end_time,
-            "extended_intervals": params.get("extended_intervals"),
-            "extended_warmup_candles": warmup_candles_map,
-            "extended_indicator_kwargs": indicator_kwargs_map,
-            "data_source_config": data_source_map,
-            "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
-        },
         "TradingAgentsStockSimAgent": lambda params: {
             **{k: v for k, v in params.items() if k != "action_interval"},
             "data_source_config": data_source_map,
             "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
-        },
-        "HistoricalOrderTrader": lambda params: {
-            **params,
-            "orders": load_json_file(params.get("orders", "")) if "orders" in params else None
         },
         "Buy_And_Hold_Trader": lambda params: {
             **params,
@@ -686,25 +616,11 @@ def main():
             "position_size_pct": params.get("position_size_pct", 0.05),
             "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
         },
-        "SLMA_Trader": lambda params: {
-            **params,
-            "short_window": params.get("short_window", 20),
-            "long_window": params.get("long_window", 50),
-            "position_size_pct": params.get("position_size_pct", 0.05),
-            "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
-        },
         "MACD_Trader": lambda params: {
             **params,
             "fast_period": params.get("fast_period", 12),
             "slow_period": params.get("slow_period", 26),
             "signal_period": params.get("signal_period", 9),
-            "position_size_pct": params.get("position_size_pct", 0.05),
-            "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
-        },
-        "Bollinger_Bands_Trader": lambda params: {
-            **params,
-            "sma_period": params.get("sma_period", 20),
-            "std_dev_multiplier": params.get("std_dev_multiplier", 2.0),
             "position_size_pct": params.get("position_size_pct", 0.05),
             "action_interval_seconds": interval_to_seconds(params["action_interval"]) if "action_interval" in params else params.get("action_interval_seconds", 86400)
         },
@@ -738,10 +654,6 @@ def main():
             if "instrument_exchange_map" not in parameters:
                 parameters["instrument_exchange_map"] = instrument_exchange_map
             parameters["rabbitmq_host"] = rabbitmq_host
-
-            if agent_type == "Random_Trader":
-                parameters["seed"] = random.randint(0, 10 ** 6)
-
 
             launcher_logger.debug(f"Parameters for agent '{agent_name}': {parameters}")
             p = Process(target=agent_runner, args=(agent_class, parameters), name=unique_agent_id)
