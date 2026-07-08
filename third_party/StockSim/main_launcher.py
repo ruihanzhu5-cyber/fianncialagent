@@ -430,7 +430,11 @@ def main():
     print_demo_banner()
 
     # Load configuration
-    config_file_path = sys.argv[1] if len(sys.argv) > 1 else "configs/demo_config.yaml"
+    config_file_path = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else os.path.join(REPO_ROOT, "configs", "stocksim_tradingagents_ashare_long_horizon.yaml")
+    )
     launcher_logger.info(f"Loading configuration from: {config_file_path}")
 
     try:
