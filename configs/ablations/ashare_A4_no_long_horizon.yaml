@@ -1,0 +1,10 @@
+experiment:
+  run_id: "ashare_A4_no_long_horizon"
+china_microstructure:
+  enabled: true
+long_horizon:
+  enable_macro_regime: false
+  enable_dynamic_memory: false
+  enable_tail_risk_veto: false
+multi_agent_activation:
+  policy: "daily_full"

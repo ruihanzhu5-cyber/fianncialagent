@@ -1,0 +1,11 @@
+experiment:
+  run_id: "ashare_A7_rule_only_risk"
+china_microstructure:
+  enabled: true
+long_horizon:
+  enable_macro_regime: true
+  enable_dynamic_memory: true
+  enable_tail_risk_veto: true
+  risk_metric: "drawdown_threshold"
+multi_agent_activation:
+  policy: "event_triggered"

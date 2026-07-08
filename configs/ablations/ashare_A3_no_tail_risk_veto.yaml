@@ -1,0 +1,10 @@
+experiment:
+  run_id: "ashare_A3_no_tail_risk_veto"
+china_microstructure:
+  enabled: true
+long_horizon:
+  enable_macro_regime: true
+  enable_dynamic_memory: true
+  enable_tail_risk_veto: false
+multi_agent_activation:
+  policy: "event_triggered"

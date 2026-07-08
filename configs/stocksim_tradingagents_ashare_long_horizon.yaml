@@ -30,6 +30,47 @@ agents:
       macro_cycle: "month"
       max_drawdown_threshold: 0.18
       min_trade_notional: 10000
+      experiment:
+        run_id: "ashare_lh_full"
+        random_seed: 42
+        deterministic_llm_cache: true
+        export_decision_trace: true
+        export_token_trace: true
+        export_microstructure_trace: true
+      china_microstructure:
+        enabled: true
+        use_raw_price_for_execution: true
+        use_adjusted_price_for_features: true
+        enforce_t_plus_one: true
+        enforce_price_limit: true
+        enforce_board_lot: true
+        tick_size: 0.01
+        commission_bps: 3
+        stamp_duty_bps_sell: 5
+        slippage_model: "fixed_bps"
+        slippage_bps: 5
+        limit_hit_fill_model: "no_fill_on_one_word_limit"
+      long_horizon:
+        enable_macro_regime: true
+        macro_frequency: "month"
+        enable_dynamic_memory: true
+        memory_policy: "recency_utility_diversity"
+        memory_budget_tokens: 1200
+        crisis_memory_pin: true
+        enable_tail_risk_veto: true
+        risk_metric: "historical_cvar"
+        cvar_alpha: 0.95
+        cvar_horizon_days: 60
+        veto_mode: "mask_or_decay"
+        max_single_name_weight: 0.35
+      multi_agent_activation:
+        policy: "event_triggered"
+        full_debate_frequency: "month"
+        cheap_daily_gate: true
+        activate_news_on_nonempty_events: true
+        activate_fundamentals_on_report_windows: true
+        early_stop_debate_on_consensus: true
+        force_full_debate_every_n_trading_days: 20
       tradingagents_config:
         market_region: "cn"
         data_source: "akshare"

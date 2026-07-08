@@ -490,6 +490,20 @@ class CandleBasedExchangeAgent(Agent):
                 "close": closes[-1], 
                 "volume": sum(volumes)
             }
+            if any("adjusted_close" in c for c in filtered):
+                adjusted_closes = [c.get("adjusted_close", c["close"]) for c in filtered]
+                overall.update({
+                    "raw_execution_open": opens[0],
+                    "raw_execution_high": max(highs),
+                    "raw_execution_low": min(lows),
+                    "raw_execution_close": closes[-1],
+                    "adjusted_open": filtered[0].get("adjusted_open", opens[0]),
+                    "adjusted_high": max(c.get("adjusted_high", c["high"]) for c in filtered),
+                    "adjusted_low": min(c.get("adjusted_low", c["low"]) for c in filtered),
+                    "adjusted_close": adjusted_closes[-1],
+                    "return_close": filtered[-1].get("return_close"),
+                    "used_price_lane": "raw_execution_price",
+                })
 
             # Calculate VWAP if available
             vwap_sum = 0.0
@@ -802,7 +816,8 @@ class CandleBasedExchangeAgent(Agent):
             "order_status": OrderStatus.FILLED.value,
             "explanation": order.get("explanation"),
             "is_short": order.get("is_short", False),
-            "is_short_cover": order.get("is_short_cover", False)
+            "is_short_cover": order.get("is_short_cover", False),
+            "used_price_lane": "raw_execution_price" if self.data_source == "akshare" else "default_price",
         }
         
         await self.send_message(order["sender"], MessageType.TRADE_EXECUTION, fill_payload)

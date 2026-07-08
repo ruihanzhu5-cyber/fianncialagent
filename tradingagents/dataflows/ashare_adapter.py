@@ -208,6 +208,37 @@ class AShareDataAdapter:
             raise NoMarketDataError(symbol, code, "no rows after A-share trade calendar alignment")
         return df.sort_values("date").reset_index(drop=True)
 
+    def load_price_lanes(
+        self,
+        symbol: str,
+        start_date: str | datetime,
+        end_date: str | datetime,
+        period: str = "daily",
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """Load adjusted analysis prices and raw execution prices side-by-side."""
+        adjusted = self.load_ohlcv_df(
+            symbol,
+            start_date,
+            end_date,
+            period=period,
+            adjust="qfq",
+            use_cache=use_cache,
+        )
+        raw = self.load_ohlcv_df(
+            symbol,
+            start_date,
+            end_date,
+            period=period,
+            adjust="",
+            use_cache=use_cache,
+        )
+        merged = adjusted.merge(raw, on="date", how="inner", suffixes=("_adjusted", "_raw"))
+        if merged.empty:
+            raise NoMarketDataError(symbol, self.normalize_symbol(symbol), "no overlap between qfq and raw lanes")
+        merged["return_close"] = merged["close_adjusted"].pct_change()
+        return merged.sort_values("date").reset_index(drop=True)
+
     def load_aggregates(
         self,
         symbol: str,
@@ -222,24 +253,49 @@ class AShareDataAdapter:
         period = self.PERIOD_MAP.get(interval.lower())
         if period is None:
             raise ValueError("AkShare adapter supports A-share daily/weekly/monthly bars only.")
-        df = self.load_ohlcv_df(
-            symbol,
-            start_date or "1990-01-01",
-            end_date or datetime.now().strftime("%Y-%m-%d"),
-            period=period,
-            adjust="qfq" if adjusted else "",
-            use_cache=use_cache,
-        )
+        if adjusted:
+            lanes = self.load_price_lanes(
+                symbol,
+                start_date or "1990-01-01",
+                end_date or datetime.now().strftime("%Y-%m-%d"),
+                period=period,
+                use_cache=use_cache,
+            )
+        else:
+            lanes = self.load_ohlcv_df(
+                symbol,
+                start_date or "1990-01-01",
+                end_date or datetime.now().strftime("%Y-%m-%d"),
+                period=period,
+                adjust="",
+                use_cache=use_cache,
+            )
+            for field in ["open", "high", "low", "close", "volume"]:
+                lanes[f"{field}_raw"] = lanes[field]
+                lanes[f"{field}_adjusted"] = lanes[field]
+            lanes["return_close"] = lanes["close"].pct_change()
         rows = [
             {
                 "timestamp": row.date.isoformat(),
-                "open": float(row.open),
-                "high": float(row.high),
-                "low": float(row.low),
-                "close": float(row.close),
-                "volume": int(row.volume),
+                # StockSim execution consumes the canonical OHLC fields. For
+                # A-shares these are raw, unadjusted prices.
+                "open": float(row.open_raw),
+                "high": float(row.high_raw),
+                "low": float(row.low_raw),
+                "close": float(row.close_raw),
+                "volume": int(row.volume_raw),
+                "raw_execution_open": float(row.open_raw),
+                "raw_execution_high": float(row.high_raw),
+                "raw_execution_low": float(row.low_raw),
+                "raw_execution_close": float(row.close_raw),
+                "adjusted_open": float(row.open_adjusted),
+                "adjusted_high": float(row.high_adjusted),
+                "adjusted_low": float(row.low_adjusted),
+                "adjusted_close": float(row.close_adjusted),
+                "return_close": None if pd.isna(row.return_close) else float(row.return_close),
+                "used_price_lane": "raw_execution_price",
             }
-            for row in df.itertuples(index=False)
+            for row in lanes.itertuples(index=False)
         ]
         if sort == "desc":
             rows.reverse()
