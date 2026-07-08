@@ -227,9 +227,12 @@ class ChinaMicrostructureGuard:
             decision.block_reason = "NO_EXECUTION_PRICE"
             return decision
 
-        rounded = self.lot_sizer.size(side, int(raw_qty), held_qty=held_qty, full_exit=full_exit)
+        if self.config.enforce_board_lot:
+            rounded = self.lot_sizer.size(side, int(raw_qty), held_qty=held_qty, full_exit=full_exit)
+        else:
+            rounded = max(0, int(raw_qty))
         decision.rounded_qty = rounded
-        if rounded != int(raw_qty):
+        if self.config.enforce_board_lot and rounded != int(raw_qty):
             self.stats["board_lot_rounded_orders"] += 1
         if rounded <= 0:
             decision.block_reason = "BOARD_LOT_ZERO"
@@ -271,7 +274,7 @@ class ChinaMicrostructureGuard:
         decision.executable = True
         return decision
 
-    def record_submitted(self, instrument: str, side: Side, qty: int, trade_date: str | date | datetime) -> None:
+    def record_filled(self, instrument: str, side: Side, qty: int, trade_date: str | date | datetime) -> None:
         if not self.config.enabled:
             return
         if side == "BUY":

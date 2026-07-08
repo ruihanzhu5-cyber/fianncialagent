@@ -497,10 +497,12 @@ class CandleBasedExchangeAgent(Agent):
                     "raw_execution_high": max(highs),
                     "raw_execution_low": min(lows),
                     "raw_execution_close": closes[-1],
+                    "raw_execution_prev_close": filtered[-1].get("raw_execution_prev_close"),
                     "adjusted_open": filtered[0].get("adjusted_open", opens[0]),
                     "adjusted_high": max(c.get("adjusted_high", c["high"]) for c in filtered),
                     "adjusted_low": min(c.get("adjusted_low", c["low"]) for c in filtered),
                     "adjusted_close": adjusted_closes[-1],
+                    "adjusted_prev_close": filtered[-1].get("adjusted_prev_close"),
                     "return_close": filtered[-1].get("return_close"),
                     "used_price_lane": "raw_execution_price",
                 })

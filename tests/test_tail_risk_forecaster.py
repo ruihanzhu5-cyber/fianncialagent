@@ -37,3 +37,12 @@ def test_low_risk_passes():
     decision = forecaster.veto_or_decay(_intent(0.2), returns)
     assert not decision.veto_mask
     assert decision.adjusted_target_weight == 0.2
+
+
+def test_tail_risk_mdd_decay_sets_decay_applied():
+    returns = [-0.03] * 80 + [0.001] * 40
+    forecaster = TailRiskForecaster(risk_budget=0.9, max_mdd=0.01, min_sample_size=30, max_single_name_weight=1.0)
+    decision = forecaster.veto_or_decay(_intent(0.5), returns)
+    assert decision.veto_mask
+    assert decision.decay_applied
+    assert decision.risk_rewrite_reason == "expected_mdd_60d exceeds threshold"

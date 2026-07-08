@@ -11,7 +11,6 @@ from typing import Annotated, Any
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
-from stockstats import wrap
 
 from .config import get_config
 from .symbol_utils import NoMarketDataError
@@ -274,6 +273,8 @@ class AShareDataAdapter:
                 lanes[f"{field}_raw"] = lanes[field]
                 lanes[f"{field}_adjusted"] = lanes[field]
             lanes["return_close"] = lanes["close"].pct_change()
+        lanes["prev_close_raw"] = lanes["close_raw"].shift(1)
+        lanes["prev_close_adjusted"] = lanes["close_adjusted"].shift(1)
         rows = [
             {
                 "timestamp": row.date.isoformat(),
@@ -288,10 +289,12 @@ class AShareDataAdapter:
                 "raw_execution_high": float(row.high_raw),
                 "raw_execution_low": float(row.low_raw),
                 "raw_execution_close": float(row.close_raw),
+                "raw_execution_prev_close": None if pd.isna(row.prev_close_raw) else float(row.prev_close_raw),
                 "adjusted_open": float(row.open_adjusted),
                 "adjusted_high": float(row.high_adjusted),
                 "adjusted_low": float(row.low_adjusted),
                 "adjusted_close": float(row.close_adjusted),
+                "adjusted_prev_close": None if pd.isna(row.prev_close_adjusted) else float(row.prev_close_adjusted),
                 "return_close": None if pd.isna(row.return_close) else float(row.return_close),
                 "used_price_lane": "raw_execution_price",
             }
@@ -322,6 +325,12 @@ class AShareDataAdapter:
         return header + out.to_csv(index=False)
 
     def get_indicator_window(self, symbol: str, indicator: str, curr_date: str, look_back_days: int) -> str:
+        try:
+            from stockstats import wrap
+        except ImportError as exc:
+            raise RuntimeError(
+                "stockstats is required for A-share indicator windows. Install project dependencies first."
+            ) from exc
         start = (pd.to_datetime(curr_date) - relativedelta(days=max(look_back_days, 260))).strftime(
             "%Y-%m-%d"
         )

@@ -28,6 +28,8 @@ class TailRiskDecision:
     veto_reason: str | None
     adjusted_target_weight: float
     low_sample_fallback: bool = False
+    decay_applied: bool = False
+    risk_rewrite_reason: str | None = None
 
 
 class TailRiskForecaster:
@@ -87,21 +89,28 @@ class TailRiskForecaster:
         adjusted = candidate
         reason = None
         veto = False
+        decay = False
         if estimate.cvar_95_60d < -abs(budget):
             veto = True
             reason = "CVaR_95_60d exceeds risk budget"
             adjusted = min(candidate, max(0.0, budget / max(abs(estimate.cvar_95_60d), 1e-9) * candidate))
         if estimate.expected_mdd_60d > self.max_mdd:
+            decay = True
             reason = "expected_mdd_60d exceeds threshold"
             adjusted = min(adjusted, candidate * 0.5)
+        if adjusted < intent.target_weight and reason is None:
+            decay = True
+            reason = "max-position cap"
         adjusted_intent = TradingIntent(**{**intent.as_dict(), "target_weight": adjusted})
         return TailRiskDecision(
             intent=adjusted_intent,
             estimate=estimate,
-            veto_mask=veto,
+            veto_mask=veto or adjusted < intent.target_weight,
             veto_reason=reason,
             adjusted_target_weight=adjusted,
             low_sample_fallback=low_sample,
+            decay_applied=decay or (adjusted < intent.target_weight and not veto),
+            risk_rewrite_reason=reason,
         )
 
     def _expected_mdd(self, weighted_returns: np.ndarray) -> float:

@@ -32,6 +32,7 @@ from tradingagents.dataflows.ashare_market_realism import (
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.activation.temporal_decoupling import TemporalDecouplingController
+from tradingagents.memory.utility_memory_manager import MemoryItem, UtilityMemoryManager
 from tradingagents.risk.tail_risk_forecaster import TailRiskForecaster
 from tradingagents.trading_intent import TradingIntent, TradingIntentParser
 from tradingagents.trace.decision_trace import DecisionTraceExporter, config_hash
@@ -42,9 +43,14 @@ class RegimeState:
     as_of: str
     horizon: str
     regime: str
-    risk_budget: float
+    max_position_weight: float
+    cvar_budget: float
     constraints: list[str]
     summary: str
+
+    @property
+    def risk_budget(self) -> float:
+        return self.max_position_weight
 
 
 class LongHorizonMemoryPool:
@@ -77,13 +83,15 @@ class MacroRegimeAgent:
         vol = compact_state.get("realized_vol_20d") or 0.0
         drawdown = compact_state.get("drawdown_from_60d_high") or 0.0
         regime = "risk_off" if vol > 0.035 or drawdown < -0.12 else "neutral"
-        risk_budget = 0.35 if regime == "risk_off" else 0.75
+        max_position_weight = 0.35 if regime == "risk_off" else 0.75
+        cvar_budget = 0.08 if regime == "risk_off" else 0.12
         return RegimeState(
             as_of=timestamp.isoformat(),
             horizon="1M-1Q",
             regime=regime,
-            risk_budget=risk_budget,
-            constraints=["cap single-name target_weight by regime risk_budget"],
+            max_position_weight=max_position_weight,
+            cvar_budget=cvar_budget,
+            constraints=["cap single-name target_weight by regime max_position_weight"],
             summary=f"{instrument}: {regime}; vol={vol:.4f}; drawdown={drawdown:.4f}",
         )
 
@@ -105,15 +113,18 @@ class RiskVetoAgent:
         # that estimates 1-2 quarter MDD/CVaR from StockSim history and vetoes
         # short-horizon aggressive actions before order submission.
         recent_dd = abs(float(compact_state.get("drawdown_from_60d_high") or 0.0))
-        budget = regime_state.risk_budget if regime_state else 1.0
+        budget = regime_state.max_position_weight if regime_state else 1.0
         proposed_weight = abs(intent.target_weight)
         veto = recent_dd > self.max_drawdown_threshold or proposed_weight > budget
 
         if not veto:
             return intent, {
                 "veto": False,
+                "veto_mask": False,
+                "decay_applied": False,
+                "risk_rewrite_reason": None,
                 "estimated_drawdown": recent_dd,
-                "risk_budget": budget,
+                "max_position_weight": budget,
                 "reason": "within long-horizon risk gate",
             }
 
@@ -132,8 +143,11 @@ class RiskVetoAgent:
         )
         return adjusted, {
             "veto": True,
+            "veto_mask": True,
+            "decay_applied": adjusted_weight != intent.target_weight,
+            "risk_rewrite_reason": "long-horizon drawdown or max-position threshold breached",
             "estimated_drawdown": recent_dd,
-            "risk_budget": budget,
+            "max_position_weight": budget,
             "reason": "long-horizon drawdown or budget threshold breached",
         }
 
@@ -187,6 +201,10 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         self.experiment_config = experiment or {}
         self.long_horizon_config = long_horizon or {}
         self.activation_config = multi_agent_activation or {}
+        self.macro_enabled = bool(self.long_horizon_config.get("enable_macro_regime", True))
+        self.dynamic_memory_enabled = bool(self.long_horizon_config.get("enable_dynamic_memory", True))
+        self.risk_veto_enabled = bool(self.long_horizon_config.get("enable_tail_risk_veto", True))
+        self.risk_metric = str(self.long_horizon_config.get("risk_metric", "historical_cvar"))
         self.run_id = str(self.experiment_config.get("run_id", "ashare_lh_run"))
         self.config_hash = config_hash({
             "experiment": self.experiment_config,
@@ -195,6 +213,10 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "multi_agent_activation": self.activation_config,
         })
         self.memory_pool = LongHorizonMemoryPool()
+        self.utility_memory = UtilityMemoryManager(
+            memory_budget_tokens=int(self.long_horizon_config.get("memory_budget_tokens", 1200)),
+            crisis_memory_pin=bool(self.long_horizon_config.get("crisis_memory_pin", True)),
+        )
         self.macro_agent = MacroRegimeAgent()
         self.risk_agent = RiskVetoAgent(max_drawdown_threshold=max_drawdown_threshold)
         self.intent_parser = TradingIntentParser()
@@ -212,6 +234,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             enabled=bool(self.experiment_config.get("export_decision_trace", True)),
         )
         self.previous_intents: dict[str, TradingIntent] = {}
+        self.pending_microstructure: dict[str, dict[str, Any]] = {}
         self.regime_cache: dict[str, RegimeState] = {}
 
     async def on_market_data_update(self, instrument: str, snapshot: dict[str, Any]) -> None:
@@ -225,16 +248,19 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
         # CHANGED FOR LONG-HORIZON:
         # Macro/Micro decoupling: only refresh expensive coarse-cycle context at
         # month/week boundary, then inject it into every micro trading decision.
-        if self._needs_regime_refresh(instrument):
+        if self.macro_enabled and self._needs_regime_refresh(instrument):
             self.regime_cache[instrument] = self.macro_agent.infer(
                 instrument=instrument,
                 timestamp=self.current_time,
                 compact_state=compact_state,
             )
 
-        regime_state = self.regime_cache.get(instrument)
+        regime_state = self.regime_cache.get(instrument) if self.macro_enabled else None
         if regime_state is not None:
             compact_state["regime"] = regime_state.regime
+        compact_state["memory"] = self._retrieve_memory(
+            instrument, regime_state.regime if regime_state else "unknown"
+        )
         self._inject_long_horizon_context(instrument, compact_state, regime_state)
 
         try:
@@ -250,20 +276,30 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
 
             # CHANGED FOR LONG-HORIZON:
             # Risk Agent veto runs after TradingAgents debate, before StockSim execution.
-            if self.long_horizon_config.get("enable_tail_risk_veto", True):
+            if not self.risk_veto_enabled:
+                safe_intent = intent
+                risk_record = self._no_risk_record(regime_state)
+            elif self.risk_metric == "historical_cvar":
+                if regime_state:
+                    self.tail_risk.max_single_name_weight = regime_state.max_position_weight
                 risk_decision = self.tail_risk.veto_or_decay(
                     intent=intent,
                     returns=list(getattr(self.metrics, "_returns", []))[-252:],
-                    risk_budget=regime_state.risk_budget if regime_state else None,
+                    risk_budget=regime_state.cvar_budget if regime_state else None,
                 )
                 safe_intent = risk_decision.intent
                 risk_record = {
                     "veto": risk_decision.veto_mask,
+                    "veto_mask": risk_decision.veto_mask,
                     "veto_reason": risk_decision.veto_reason,
+                    "decay_applied": risk_decision.decay_applied,
+                    "risk_rewrite_reason": risk_decision.risk_rewrite_reason,
+                    "risk_engine": "historical_cvar",
+                    "risk_metric": self.risk_metric,
                     "cvar_95_60d": risk_decision.estimate.cvar_95_60d,
                     "var_95_60d": risk_decision.estimate.var_95_60d,
                     "expected_mdd_60d": risk_decision.estimate.expected_mdd_60d,
-                    "sample_size": risk_decision.estimate.sample_size,
+                    "risk_sample_size": risk_decision.estimate.sample_size,
                     "low_sample_fallback": risk_decision.low_sample_fallback,
                 }
             else:
@@ -272,6 +308,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
                     regime_state=regime_state,
                     compact_state=compact_state,
                 )
+                risk_record.update({"risk_engine": "drawdown_threshold", "risk_metric": self.risk_metric})
             execution_record = await self._execute_target_weight(safe_intent, data)
             self._record_bridge_decision(
                 instrument,
@@ -345,7 +382,35 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "short_qty": self.short_qty[instrument],
             "drawdown_from_60d_high": dd,
             "realized_vol_20d": indicators.get("volatility_20d") or indicators.get("atr"),
-            "memory": self.memory_pool.retrieve(instrument),
+            "memory": self._retrieve_memory(instrument, "unknown"),
+        }
+
+    def _retrieve_memory(self, instrument: str, regime: str | None) -> dict[str, Any]:
+        if not self.dynamic_memory_enabled:
+            recent = self.memory_pool.retrieve(instrument)
+            return {
+                **recent,
+                "dynamic_memory_enabled": False,
+                "memory_items_used": len(recent.get("decision_ledger", [])),
+                "memory_pruned_count": 0,
+                "memory_scores": {},
+                "crisis_pinned_count": 0,
+            }
+        as_of = self.current_time.strftime("%Y-%m-%d") if self.current_time else None
+        selected = self.utility_memory.retrieve(
+            ticker=instrument,
+            current_regime=regime or "unknown",
+            as_of=as_of,
+        )
+        trace = dict(self.utility_memory.last_trace)
+        crisis_pinned_count = sum(
+            1 for item in selected if item.was_black_swan or (item.max_drawdown_after_decision or 0.0) < -0.12
+        )
+        return {
+            "dynamic_memory_enabled": True,
+            "decision_ledger": [item.__dict__ for item in selected],
+            "crisis_pinned_count": crisis_pinned_count,
+            **trace,
         }
 
     def _uses_ashare_data(self, config: dict[str, Any]) -> bool:
@@ -441,16 +506,15 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
                 candle=data,
             )
             if decision.executable:
-                await self.place_order(
+                order_id = await self.place_order(
                     instrument,
                     Side.BUY.value,
                     decision.rounded_qty,
                     "MARKET",
                     explanation=intent.rationale,
                 )
-                self.microstructure_guard.record_submitted(
-                    instrument, "BUY", decision.rounded_qty, self.current_time
-                )
+                if order_id:
+                    self.pending_microstructure[order_id] = self._pending_micro_record(instrument, decision)
             return self._execution_record(decision)
         if delta_value < 0 or intent.action in {"SELL", "EXIT", "REDUCE"}:
             decision = self.microstructure_guard.prepare_order(
@@ -463,18 +527,74 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
                 full_exit=intent.action == "EXIT" or intent.target_weight == 0,
             )
             if decision.executable:
-                await self.place_order(
+                order_id = await self.place_order(
                     instrument,
                     Side.SELL.value,
                     decision.rounded_qty,
                     "MARKET",
                     explanation=intent.rationale,
                 )
-                self.microstructure_guard.record_submitted(
-                    instrument, "SELL", decision.rounded_qty, self.current_time
-                )
+                if order_id:
+                    self.pending_microstructure[order_id] = self._pending_micro_record(instrument, decision)
             return self._execution_record(decision)
         return base_record
+
+    async def on_trade_execution(self, trade_data: dict[str, Any]) -> None:
+        await super().on_trade_execution(trade_data)
+        order_id = trade_data.get("order_id")
+        micro = self.pending_microstructure.pop(order_id, None) if order_id else None
+        if not micro:
+            return
+        side = "BUY" if trade_data.get("role") == "BUYER" else "SELL"
+        qty = int(trade_data.get("quantity") or micro.get("rounded_qty") or 0)
+        instrument = trade_data.get("instrument") or micro.get("instrument")
+        trade_date = self.current_time or micro.get("trade_date")
+        if instrument and qty > 0:
+            self.microstructure_guard.record_filled(instrument, side, qty, trade_date)
+        fee = float(micro.get("total_transaction_cost") or 0.0)
+        if fee > 0:
+            self.cash -= fee
+            self.microstructure_guard.stats["accounting_transaction_cost"] = (
+                self.microstructure_guard.stats.get("accounting_transaction_cost", 0.0) + fee
+            )
+            if self.metrics.trade_history:
+                self.metrics.trade_history[-1]["transaction_cost"] = fee
+
+    def _apply_position_cap(
+        self, intent: TradingIntent, regime_state: RegimeState | None
+    ) -> TradingIntent:
+        if not regime_state or intent.target_weight <= regime_state.max_position_weight:
+            return intent
+        return TradingIntent(**{
+            **intent.as_dict(),
+            "target_weight": regime_state.max_position_weight,
+            "rationale": f"{intent.rationale}\n[MACRO_CAP] max_position_weight={regime_state.max_position_weight:.4f}",
+        })
+
+    def _no_risk_record(self, regime_state: RegimeState | None) -> dict[str, Any]:
+        return {
+            "risk_engine": "disabled",
+            "risk_metric": self.risk_metric,
+            "veto": False,
+            "veto_mask": False,
+            "decay_applied": False,
+            "risk_rewrite_reason": None,
+            "veto_reason": None,
+            "cvar_95_60d": None,
+            "var_95_60d": None,
+            "expected_mdd_60d": None,
+            "risk_sample_size": 0,
+            "max_position_weight": regime_state.max_position_weight if regime_state else None,
+            "cvar_budget": regime_state.cvar_budget if regime_state else None,
+        }
+
+    def _pending_micro_record(self, instrument: str, decision) -> dict[str, Any]:
+        return {
+            **self._execution_record(decision),
+            "instrument": instrument,
+            "trade_date": self.current_time.isoformat() if self.current_time else None,
+            "total_transaction_cost": decision.transaction_cost.total,
+        }
 
     def _record_bridge_decision(
         self,
@@ -494,16 +614,46 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "confidence": intent.confidence,
             "risk": risk_record,
         })
+        self.utility_memory.add(MemoryItem(
+            event_time=compact_state.get("timestamp") or "",
+            ticker=instrument,
+            regime=compact_state.get("regime") or "unknown",
+            action=intent.action,
+            target_weight=intent.target_weight,
+            max_drawdown_after_decision=compact_state.get("drawdown_from_60d_high"),
+            veto_triggered=bool(risk_record.get("veto_mask") or risk_record.get("veto")),
+            was_black_swan=abs(float(compact_state.get("return_1d") or 0.0)) > 0.08,
+            text_summary=f"{intent.action} target={intent.target_weight:.4f} risk={risk_record.get('risk_rewrite_reason')}",
+            metadata={"confidence": intent.confidence},
+        ))
+        memory_trace = compact_state.get("memory", {}) if isinstance(compact_state.get("memory"), dict) else {}
+        regime_state = self.regime_cache.get(instrument) if self.macro_enabled else None
         record = {
             "date": self.current_time.strftime("%Y-%m-%d") if self.current_time else None,
             "ticker": instrument,
             "config_hash": self.config_hash,
-            "macro_enabled": self.long_horizon_config.get("enable_macro_regime", True),
-            "memory_enabled": self.long_horizon_config.get("enable_dynamic_memory", True),
-            "risk_veto_enabled": self.long_horizon_config.get("enable_tail_risk_veto", True),
+            "macro_enabled": self.macro_enabled,
+            "macro_disabled": not self.macro_enabled,
+            "dynamic_memory_enabled": self.dynamic_memory_enabled,
+            "risk_veto_enabled": self.risk_veto_enabled,
+            "risk_metric": self.risk_metric,
+            "microstructure_enabled": self.microstructure_guard.config.enabled,
             "regime": compact_state.get("regime"),
+            "max_position_weight": regime_state.max_position_weight if regime_state else risk_record.get("max_position_weight"),
+            "cvar_budget": regime_state.cvar_budget if regime_state else risk_record.get("cvar_budget"),
             "raw_intent": raw_intent.as_dict() if raw_intent else None,
             "risk_adjusted_intent": intent.as_dict(),
+            "veto_mask": bool(risk_record.get("veto_mask") or risk_record.get("veto")),
+            "decay_applied": bool(risk_record.get("decay_applied")),
+            "risk_rewrite_reason": risk_record.get("risk_rewrite_reason"),
+            "cvar_95_60d": risk_record.get("cvar_95_60d"),
+            "var_95_60d": risk_record.get("var_95_60d"),
+            "expected_mdd_60d": risk_record.get("expected_mdd_60d"),
+            "risk_sample_size": risk_record.get("risk_sample_size", 0),
+            "memory_items_used": memory_trace.get("memory_items_used", 0),
+            "memory_pruned_count": memory_trace.get("memory_pruned_count", 0),
+            "memory_scores": memory_trace.get("memory_scores", {}),
+            "crisis_pinned_count": memory_trace.get("crisis_pinned_count", 0),
             **(activation_record or {}),
             **risk_record,
             **(execution_record or {}),
@@ -523,6 +673,7 @@ class TradingAgentsStockSimAgent(TraderAgent):  # type: ignore[misc,valid-type]
             "commission": decision.transaction_cost.commission,
             "stamp_duty": decision.transaction_cost.stamp_duty,
             "slippage": decision.transaction_cost.slippage,
+            "total_transaction_cost": decision.transaction_cost.total,
         }
 
     async def _publish_decision_done(self) -> None:

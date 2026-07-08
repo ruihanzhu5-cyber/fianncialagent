@@ -16,7 +16,7 @@ def test_t_plus_one_blocks_same_day_sell_and_allows_next_day():
 
 def test_microstructure_guard_blocks_same_day_sell_with_trace_reason():
     guard = ChinaMicrostructureGuard(MicrostructureConfig())
-    guard.record_submitted("600519.SH", "BUY", 100, "2024-03-15")
+    guard.record_filled("600519.SH", "BUY", 100, "2024-03-15")
     decision = guard.prepare_order(
         instrument="600519.SH",
         side="SELL",
@@ -70,3 +70,79 @@ def test_transaction_costs_include_sell_stamp_duty():
     assert sell.commission == 0.3
     assert sell.stamp_duty == 0.5
     assert sell.slippage == 0.5
+
+
+def test_submitted_unfilled_order_does_not_change_t_plus_one_inventory():
+    guard = ChinaMicrostructureGuard(MicrostructureConfig())
+    decision = guard.prepare_order(
+        instrument="600519.SH",
+        side="SELL",
+        raw_qty=100,
+        held_qty=100,
+        trade_date="2024-03-15",
+        candle={"raw_execution_close": 100, "raw_execution_prev_close": 99},
+    )
+    assert not decision.executable
+    assert decision.block_reason == "T_PLUS_ONE"
+
+
+def test_microstructure_component_flags_can_be_disabled():
+    guard = ChinaMicrostructureGuard(MicrostructureConfig(enforce_board_lot=False))
+    buy = guard.prepare_order(
+        instrument="600519.SH",
+        side="BUY",
+        raw_qty=146,
+        held_qty=0,
+        trade_date="2024-03-15",
+        candle={"raw_execution_close": 10, "raw_execution_prev_close": 9.8},
+    )
+    assert buy.executable
+    assert buy.rounded_qty == 146
+
+    guard = ChinaMicrostructureGuard(MicrostructureConfig(enforce_t_plus_one=False))
+    sell = guard.prepare_order(
+        instrument="600519.SH",
+        side="SELL",
+        raw_qty=100,
+        held_qty=100,
+        trade_date="2024-03-15",
+        candle={"raw_execution_close": 10, "raw_execution_prev_close": 9.8},
+    )
+    assert sell.executable
+
+    guard = ChinaMicrostructureGuard(MicrostructureConfig(enforce_price_limit=False))
+    limit_buy = guard.prepare_order(
+        instrument="600519.SH",
+        side="BUY",
+        raw_qty=100,
+        held_qty=0,
+        trade_date="2024-03-15",
+        candle={
+            "raw_execution_open": 11,
+            "raw_execution_high": 11,
+            "raw_execution_low": 11,
+            "raw_execution_close": 11,
+            "raw_execution_prev_close": 10,
+        },
+    )
+    assert limit_buy.executable
+
+
+def test_price_limit_blocks_with_adapter_style_fields():
+    guard = ChinaMicrostructureGuard(MicrostructureConfig())
+    decision = guard.prepare_order(
+        instrument="600519.SH",
+        side="BUY",
+        raw_qty=100,
+        held_qty=0,
+        trade_date="2024-03-15",
+        candle={
+            "raw_execution_open": 11,
+            "raw_execution_high": 11,
+            "raw_execution_low": 11,
+            "raw_execution_close": 11,
+            "raw_execution_prev_close": 10,
+        },
+    )
+    assert not decision.executable
+    assert decision.limit_hit_state == "ONE_WORD_LIMIT_UP"

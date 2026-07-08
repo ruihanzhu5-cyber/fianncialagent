@@ -41,6 +41,25 @@ python third_party/StockSim/main_launcher.py configs/stocksim_tradingagents_asha
 
 Set `OPENAI_API_KEY` and a reachable RabbitMQ host. AkShare A-share runs do not require `POLYGON_API_KEY` or `ALPHA_VANTAGE_API_KEY`; legacy overseas configs still do.
 
+## A-share Ablations
+
+Run ablations by merging the base StockSim config with an overlay:
+
+```bash
+python scripts/run_ablation.py --base configs/stocksim_tradingagents_ashare_long_horizon.yaml --overlay configs/ablations/ashare_A0_full.yaml
+```
+
+Use `--dry-run` to only materialize the merged YAML. Ablation IDs:
+
+- `A0_full`: MacroRegime + DynamicMemory + TailRiskVeto + ChinaMicrostructure.
+- `A1_no_macro`: disables macro regime control.
+- `A2_no_dynamic_memory`: disables utility-scored memory retrieval.
+- `A3_no_tail_risk_veto`: disables risk intent rewrites.
+- `A4_no_long_horizon`: disables macro, dynamic memory, and tail-risk veto.
+- `A5_no_china_microstructure`: disables A-share microstructure guards.
+- `A6_daily_full_debate`: forces daily full debate.
+- `A7_rule_only_risk`: uses drawdown-threshold risk instead of historical CVaR.
+
 ## Metrics
 
 StockSim exports metrics under `METRICS_OUTPUT_DIR` or `metrics/`, including:
